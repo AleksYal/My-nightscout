@@ -1,69 +1,69 @@
 'use strict';
 
-function configure (app, wares, env, ctx) {
-  var express = require('express'),
-    forwarded = require('forwarded-for'),
-    api = express.Router( )
+function configure (app, ctx, env) {
+  const express = require('express')
+    , api = express.Router( )
+    , apiConst = require('../const.json')
+    , storageTools = require('../shared/storageTools')
+    , security = require('../security')
+    , opTools = require('../shared/operationTools')
     ;
 
-  api.use(wares.sendJSONStatus);
-  api.use(wares.extensions([
-    'json', 'svg', 'csv', 'txt', 'png', 'html', 'js'
-  ]));
+  api.get('/status', async function getStatus (req, res) {
 
-  api.use(ctx.authorization.isPermitted('api:status:read'));
+    function permsForCol (col, auth) {
+      let colPerms = '';
 
-  // Status badge/text/json
-  api.get('/status', function (req, res) {
-    
-    let extended = env.settings.filteredSettings(app.extendedClientSettings);
-    let settings = env.settings.filteredSettings(env.settings);
+      if (security.checkPermission(auth, 'api:' + col.colName + ':create')) {
+          colPerms += 'c';
+      }
 
-    var authToken = req.query.token || req.query.secret || '';
+      if (security.checkPermission(auth, 'api:' + col.colName + ':read')) {
+          colPerms += 'r';
+      }
 
-    function getRemoteIP (req) {
-      const address = forwarded(req, req.headers);
-      return address.ip;
+      if (security.checkPermission(auth, 'api:' + col.colName + ':update')) {
+          colPerms += 'u';
+      }
+
+      if (security.checkPermission(auth, 'api:' + col.colName + ':delete')) {
+          colPerms += 'd';
+      }
+
+      return colPerms;
     }
 
-    var date = new Date();
-    var info = { status: 'ok'
-      , name: app.get('name')
-      , version: app.get('version')
-      , serverTime: date.toISOString()
-      , serverTimeEpoch: date.getTime()
-      , apiEnabled: app.enabled('api')
-      , careportalEnabled: app.enabled('api') && env.settings.enable.indexOf('careportal') > -1
-      , boluscalcEnabled: app.enabled('api') && env.settings.enable.indexOf('boluscalc') > -1
-      , settings: settings
-      , extendedSettings: extended
-      , authorized: ctx.authorization.authorize(authToken, getRemoteIP(req))
-      , runtimeState: ctx.runtimeState
-    };
 
-    var badge = 'http://img.shields.io/badge/Nightscout-OK-green';
-    return res.format({
-      html: function ( ) {
-        res.send('<h1>STATUS OK</h1>');
-      },
-      png: function ( ) {
-        res.redirect(302, badge + '.png');
-      },
-      svg: function ( ) {
-        res.redirect(302, badge + '.svg');
-      },
-      js: function ( ) {
-        var parts = ['this.serverSettings =', JSON.stringify(info), ';'];
+    async function operation (opCtx) {
+      const cols = app.get('collections');
 
-        res.send(parts.join(' '));
-      },
-      text: function ( ) {
-        res.send('STATUS OK');
-      },
-      json: function ( ) {
-        res.json(info);
+      let info = await storageTools.getVersionInfo(app);
+
+      info.apiPermissions = {};
+      for (let col in cols) {
+        const colPerms = permsForCol(col, opCtx.auth);
+        if (colPerms) {
+          info.apiPermissions[col] = colPerms;
+        }
       }
-    });
+
+      opTools.sendJSON({ res, result: info });
+    }
+
+
+    const opCtx = { app, ctx, env, req, res };
+
+    try {
+      opCtx.auth = await security.authenticate(opCtx);
+
+      await operation(opCtx);
+
+    } catch (err) {
+      console.error(err);
+      if (!res.headersSent) {
+        return opTools.sendJSONStatus(res, apiConst.HTTP.INTERNAL_ERROR, apiConst.MSG.STORAGE_ERROR);
+      }
+    }
   });
 
   return api;
